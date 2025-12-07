@@ -273,6 +273,7 @@ class SileroDiarizer(Diarizer):
                     linkage="average",
                     distance_threshold=threshold,
                 )
+                
             labels = clustering.fit_predict(embeddings_normalized)
             best_result = {
                 "name": "fallback",

@@ -72,6 +72,7 @@ class CustomDiarizer(Diarizer):
         """
         Converts SPEAKER_00, SPEAKER_01, etc. to Speaker 1, Speaker 2, etc.
         """
+        
         try:
             n = int(speaker_label.split("_")[-1])
             return f"Speaker {n + 1}"

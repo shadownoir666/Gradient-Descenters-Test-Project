@@ -41,6 +41,7 @@ class Diarizer:
     "start": 3.2,
     "end": 5.7,
     "speaker": "Speaker 2"
+    
   }
 ]
 """
