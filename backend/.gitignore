@@ -1,2 +1,110 @@
-venv
+# ---------------------------
+# Python Audio Diarizer .gitignore
+# ---------------------------
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.pdb
+*.so
+*.dll
+
+# Bytecode
+*$py.class
+
+# --- Virtual Environments ---
+venv/
+env/
+.venv/
+ENV/
+myenv/
+
+# --- Build & Distribution ---
+build/
+dist/
+*.egg-info/
+*.egg
+
+# --- Logs & Temp Files ---
+*.log
+logs/
+*.tmp
+tmp/
+temp/
+cache/
+*.cache
+
+# --- Jupyter Notebooks ---
+.ipynb_checkpoints/
+*.ipynb_convert/
+
+# --- Audio Processing Artifacts ---
+# Raw audio outputs
+*.wav
+*.mp3
+*.flac
+*.ogg
+
+# Intermediate split chunks / VAD segments
+segments/
+chunks/
+audio_splits/
+
+# Spectrograms / visualization images
+*.png
+*.jpg
+*.jpeg
+*.svg
+
+# Feature files (MFCC, embeddings, numpy saves)
+*.npy
+*.npz
+embeddings/
+features/
+
+# Model checkpoints (if you train or fine-tune)
+checkpoints/
+*.ckpt
+*.pt
+*.pth
+*.bin
+*.onnx
+
+# Silero VAD downloaded model
+silero_vad.jit
+
+# Resemblyzer voice encoder cache
+/.config/resemblyzer/
+**/pretrained.pt
+voice_encoder/
+
+# HuggingFace cache
+huggingface/
+.huggingface/
+~/.cache/huggingface
+
+# --- FastAPI / Streamlit ---
+# FastAPI auto-generated files
+*.db
+*.sqlite3
+instance/
+
+# Streamlit cache
+.streamlit/
+
+# --- IDE Specific ---
+# VSCode
+.vscode/
+*.code-workspace
+
+# PyCharm / JetBrains
+.idea/
+
+# --- OS Files ---
+.DS_Store
+Thumbs.db
+desktop.ini
+
 .env

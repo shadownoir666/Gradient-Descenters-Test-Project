@@ -47,7 +47,8 @@ class SileroDiarizer(Diarizer):
             model="silero_vad",
             force_reload=False,
             trust_repo=True,
-        )
+        ) #downloads from github
+
         self.model.to(self.device)
         (
             self.get_speech_timestamps,
@@ -58,8 +59,19 @@ class SileroDiarizer(Diarizer):
         ) = self.utils
 
     def _load_audio(self, audio_path: str) -> Tuple[torch.Tensor, np.ndarray]:
-        wav, sr = torchaudio.load(audio_path)
+        import soundfile
+        # Load directly with soundfile to avoid torchaudio backend issues
+        wav_np, sr = soundfile.read(audio_path)
         
+        # soundfile returns (time, channels) or (time,)
+        # torchaudio expects (channels, time)
+        if wav_np.ndim == 1:
+            # Mono: (samples,) -> (1, samples)
+            wav = torch.from_numpy(wav_np).unsqueeze(0).float()
+        else:
+            # Multi-channel: (samples, channels) -> (channels, samples)
+            wav = torch.from_numpy(wav_np).t().float()
+
         if wav.shape[0] > 1:
             wav = torch.mean(wav, dim=0, keepdim=True)
         
@@ -78,7 +90,7 @@ class SileroDiarizer(Diarizer):
             wav.squeeze(0), 
             self.model, 
             sampling_rate=self.sample_rate,
-            threshold=0.5,
+            threshold=0.5, #confidence threshold above it its a speach
             min_speech_duration_ms=300,
             min_silence_duration_ms=100,
         )
@@ -87,6 +99,8 @@ class SileroDiarizer(Diarizer):
             {"start": int(ts["start"]), "end": int(ts["end"])}
             for ts in speech_ts
         ]
+#using silero vad
+
 
     def _create_embedding_windows(
         self, 
@@ -117,9 +131,12 @@ class SileroDiarizer(Diarizer):
                     
                     max_amp = np.abs(window_audio).max()
                     if max_amp > 0:
-                        window_audio = window_audio / max_amp
+                        window_audio = window_audio / max_amp # normalizing the audio so that if speaker speaks or shout we can identify same speaker
                     
                     embedding = self.encoder.embed_utterance(window_audio)
+
+                    #selft.encoder- resembllyzer - pre-trained model
+                    #takes input as audio and returns embedding in 1 x256 array
                     
                     if np.isfinite(embedding).all():
                         embeddings.append(embedding)
@@ -159,15 +176,19 @@ class SileroDiarizer(Diarizer):
         if not embeddings:
             return np.array([]), []
         
-        return np.stack(embeddings, axis=0), windows
+        return np.stack(embeddings, axis=0), windows # np.stack -will make 2d matrix
 
     def _compute_distance_stats(self, embeddings: np.ndarray) -> Dict:
-        norms = np.linalg.norm(embeddings, axis=1, keepdims=True) + 1e-8
-        embeddings_normalized = embeddings / norms
+        norms = np.linalg.norm(embeddings, axis=1, keepdims=True) + 1e-8 #length of vector
+        embeddings_normalized = embeddings / norms #making unit vectors
         
         distances = cosine_distances(embeddings_normalized)
-        triu_indices = np.triu_indices_from(distances, k=1)
-        pairwise_dists = distances[triu_indices]
+        #Produces a square matrix: (N × N)
+        #Where distance[i][j] = cosine distance between embedding i and j.
+
+
+        triu_indices = np.triu_indices_from(distances, k=1) #picks upper part of distance avoid duplication
+        pairwise_dists = distances[triu_indices] 
         
         return {
             "min": float(pairwise_dists.min()),
@@ -179,12 +200,23 @@ class SileroDiarizer(Diarizer):
             "q75": float(np.percentile(pairwise_dists, 75)),
         }
 
-    def _adaptive_clustering(self, embeddings: np.ndarray) -> Tuple[np.ndarray, Dict]:
+    def _adaptive_clustering(self, embeddings: np.ndarray) -> Tuple[np.ndarray, Dict, List[Dict]]:
+        import matplotlib.pyplot as plt
+        import io
+        import base64
+        from scipy.cluster.hierarchy import linkage, fcluster, dendrogram
+        
         if len(embeddings) <= 1:
-            return np.array([0] * len(embeddings)), {"method": "single"}
+            return np.array([0] * len(embeddings)), {"method": "single"}, []
         
         norms = np.linalg.norm(embeddings, axis=1, keepdims=True) + 1e-8
         embeddings_normalized = embeddings / norms
+        
+        # Use scipy for efficient hierarchical clustering (compute linkage once)
+        # 'cosine' metric with 'average' linkage is equivalent to standard practice
+        # Note: scipy linkage expects condensed distance matrix or raw data
+        # For 'cosine', we can pass raw data with metric='cosine'
+        Z = linkage(embeddings_normalized, method='average', metric='cosine')
         
         dist_stats = self._compute_distance_stats(embeddings)
         
@@ -200,29 +232,14 @@ class SileroDiarizer(Diarizer):
         
         best_result = None
         best_score = -float('inf')
+        dendrograms_data = []
         
         for name, threshold in candidates:
-            try:
-                clustering = AgglomerativeClustering(
-                    n_clusters=None,
-                    metric="cosine",
-                    linkage="average",
-                    distance_threshold=threshold,
-                )
-            except TypeError:
-                clustering = AgglomerativeClustering(
-                    n_clusters=None,
-                    affinity="cosine",
-                    linkage="average",
-                    distance_threshold=threshold,
-                )
-            
-            labels = clustering.fit_predict(embeddings_normalized)
+            # Flatten clusters at this threshold
+            labels = fcluster(Z, t=threshold, criterion='distance') - 1
             n_clusters = len(np.unique(labels))
             
-            if n_clusters < self.min_speakers or n_clusters > self.max_speakers:
-                continue
-            
+            # --- Calculate Score (for visualization and selection) ---
             score = 0.0
             
             # Silhouette score
@@ -236,15 +253,45 @@ class SileroDiarizer(Diarizer):
                     pass
             
             # Cluster balance
-            cluster_sizes = [int((labels == l).sum()) for l in np.unique(labels)]
-            min_size = min(cluster_sizes)
-            max_size = max(cluster_sizes)
-            balance = min_size / max_size if max_size > 0 else 0
-            score += balance * 0.2
+            if n_clusters > 0:
+                cluster_sizes = [int((labels == l).sum()) for l in np.unique(labels)]
+                min_size = min(cluster_sizes)
+                max_size = max(cluster_sizes)
+                balance = min_size / max_size if max_size > 0 else 0
+                score += balance * 0.2
             
-            # Prefer 2-4 speakers
-            if 2 <= n_clusters <= 4:
-                score += 0.2
+            # --- Generate Dendrogram Plot ---
+            try:
+                plt.figure(figsize=(10, 5))
+                dendrogram(
+                    Z,
+                    color_threshold=threshold,
+                    above_threshold_color='gray',
+                    no_labels=True
+                )
+                plt.axhline(y=threshold, c='r', lw=2, linestyle='--')
+                plt.title(f"{name.title()} (Thresh={threshold:.3f}, K={n_clusters}, Score={score:.3f})")
+                plt.xlabel("Segments")
+                plt.ylabel("Cosine Distance")
+                
+                buf = io.BytesIO()
+                plt.savefig(buf, format='png', bbox_inches='tight')
+                plt.close()
+                buf.seek(0)
+                img_str = base64.b64encode(buf.read()).decode('utf-8')
+                
+                dendrograms_data.append({
+                    "name": name,
+                    "threshold": threshold,
+                    "score": score,
+                    "image": img_str
+                })
+            except Exception as e:
+                print(f"Error plotting dendrogram: {e}")
+
+            # Check constraints for selection
+            if n_clusters < self.min_speakers or n_clusters > self.max_speakers:
+                continue
             
             if score > best_score:
                 best_score = score
@@ -257,24 +304,9 @@ class SileroDiarizer(Diarizer):
                 }
         
         if best_result is None:
-            # Fallback
+            # Fallback to median
             threshold = dist_stats["median"]
-            try:
-                clustering = AgglomerativeClustering(
-                    n_clusters=None,
-                    metric="cosine",
-                    linkage="average",
-                    distance_threshold=threshold,
-                )
-            except TypeError:
-                clustering = AgglomerativeClustering(
-                    n_clusters=None,
-                    affinity="cosine",
-                    linkage="average",
-                    distance_threshold=threshold,
-                )
-                
-            labels = clustering.fit_predict(embeddings_normalized)
+            labels = fcluster(Z, t=threshold, criterion='distance') - 1
             best_result = {
                 "name": "fallback",
                 "threshold": threshold,
@@ -282,11 +314,15 @@ class SileroDiarizer(Diarizer):
                 "labels": labels,
             }
         
-        return best_result["labels"], {
+        # Always include the chosen one in dendrograms if not present (unlikely with fallback)
+        
+        cluster_info = {
             "threshold": best_result["threshold"],
             "n_clusters": best_result["n_clusters"],
             "method": best_result["name"],
         }
+        
+        return best_result["labels"], cluster_info, dendrograms_data
 
     def _merge_similar_speakers(
         self, 
@@ -308,7 +344,8 @@ class SileroDiarizer(Diarizer):
         for label in unique_labels:
             mask = labels == label
             centroids[int(label)] = embeddings_normalized[mask].mean(axis=0)
-        
+        #A centroid = average voice fingerprint for that speaker group.
+
         # Pairwise similarities
         speaker_ids = sorted(centroids.keys())
         n = len(speaker_ids)
@@ -371,7 +408,7 @@ class SileroDiarizer(Diarizer):
         if not segments:
             return []
         
-        segments = sorted(segments, key=lambda x: x["start"])
+        segments = sorted(segments, key=lambda x: x["start"]) #sort segment by time
         
         merged = []
         for seg in segments:
@@ -396,7 +433,7 @@ class SileroDiarizer(Diarizer):
         
         return merged
 
-    def diarize(self, audio_path: str) -> List[Dict]:
+    def diarize(self, audio_path: str) -> Tuple[List[Dict], List[Dict]]:
         if not os.path.exists(audio_path):
             raise FileNotFoundError(f"Audio not found: {audio_path}")
         
@@ -414,7 +451,7 @@ class SileroDiarizer(Diarizer):
             return []
         
         # Adaptive clustering
-        labels, cluster_info = self._adaptive_clustering(embeddings)
+        labels, cluster_info, dendrograms = self._adaptive_clustering(embeddings)
         
         # Merge similar speakers
         labels = self._merge_similar_speakers(embeddings, labels)
@@ -427,4 +464,4 @@ class SileroDiarizer(Diarizer):
         # Post-process
         final_segments = self._postprocess_segments(segments)
         
-        return final_segments
+        return final_segments, dendrograms
