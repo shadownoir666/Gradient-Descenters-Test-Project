@@ -175,8 +175,9 @@ This adds an extra semantic layer to the diarization output and enables richer a
 ## 👥 Team & Acknowledgements
 
 Built with ❤️ by:
-- **Anupam**
+- **Ishaan Singh**
 - **Vansh Saini**
+- **Anupam**
 - **Piyush Garg**
 
 
